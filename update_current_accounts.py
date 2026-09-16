@@ -16,7 +16,9 @@ import requests
 from selenium import webdriver
 
 GROUP_ID = "5ba29530a9a3c57d4039f59d"
-EXPORT_URL = f"https://www.overleaf.com/manage/groups/{GROUP_ID}/members/export"
+BASE_URL = f"https://www.overleaf.com/manage/groups/{GROUP_ID}/members"
+EXPORT_URL = f"{BASE_URL}/export"
+SHEET_NAME = "Revised Overleaf Bundle"
 
 
 def wait_for_login(driver: webdriver.Firefox, url: str) -> None:
@@ -31,7 +33,7 @@ def wait_for_login(driver: webdriver.Firefox, url: str) -> None:
 
     Example:
         >>> driver = webdriver.Firefox()
-        >>> wait_for_login(driver, EXPORT_URL)
+        >>> wait_for_login(driver, BASE_URL)
     """
     driver.get(url)
     input(
@@ -104,21 +106,7 @@ def download_export(session: requests.Session, url: str, dest_dir: str) -> str:
     return dest_path
 
 
-def load_members(csv_path: str) -> pd.DataFrame:
-    """Load a members export CSV into a DataFrame.
-
-    Args:
-        csv_path (str):
-            Path to the members export CSV file.
-
-    Returns:
-        pd.DataFrame:
-            The members export data.
-    """
-    return pd.read_csv(csv_path)
-
-
-def main() -> pd.DataFrame:
+def main() -> None:
     """Authenticate, download the group members export, and load it.
 
     Returns:
@@ -127,16 +115,27 @@ def main() -> pd.DataFrame:
     """
     driver = webdriver.Firefox()
     try:
-        wait_for_login(driver, EXPORT_URL)
+        wait_for_login(driver, BASE_URL)
         session = build_authenticated_session(driver)
     finally:
         driver.quit()
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         csv_path = download_export(session, EXPORT_URL, tmp_dir)
-        members = load_members(csv_path)
+        members = pd.read_csv(csv_path)
+    members = members[["email", "last_logged_in_at"]]
 
-    return members
+    gc = gspread.oauth()
+    bundle = gc.open(SHEET_NAME)
+    sheets = bundle.worksheets()
+
+    # find Current Accounts tab
+    for sheet in sheets:
+        if sheet.title == "Current Accounts":
+            break
+    assert sheet.title == "Current Accounts", "Could not find Current Accounts in sheet"
+
+    sheet.update([members.columns.values.tolist()] + members.fillna("").values.tolist())
 
 
 if __name__ == "__main__":
