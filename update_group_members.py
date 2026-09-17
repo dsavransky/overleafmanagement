@@ -4,13 +4,13 @@ Reads the ``account_deltas.xlsx`` file produced by
 ``generate_account_deltas.py`` (sheets ``"Delete"`` and ``"Add"``, each a
 single ``Email`` column) and drives an authenticated Selenium session
 against the Overleaf group members management page to remove the deleted
-accounts (page by page, with user confirmation before each removal) and
-invite the added accounts. Reuses the login/URL plumbing already defined in
-``update_current_accounts.py``.
+accounts (one at a time, via the members-search box, with user confirmation
+before each removal) and invite the added accounts. Reuses the login/URL
+plumbing already defined in ``update_current_accounts.py``.
 """
 
 import argparse
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 from selenium import webdriver
@@ -27,10 +27,13 @@ DELETE_SHEET_NAME = "Delete"
 ADD_SHEET_NAME = "Add"
 EMAIL_COLUMN = "Email"
 WAIT_TIMEOUT_SECONDS = 15
+MAX_REMOVE_ATTEMPTS = 2
 
 TABLE_ROW_SELECTOR = "table.managed-entities-table tbody tr.managed-entity-row"
 CHECKBOX_SELECTOR = 'td.cell-checkbox input[data-testid="select-single-checkbox"]'
 EMAIL_CELL_SELECTOR = "td.cell-email"
+SEARCH_INPUT_SELECTOR = 'input[data-testid="search-members-input"]'
+NO_MEMBERS_XPATH = "//*[normalize-space(text())='No members']"
 INVITE_INPUT_ID = "add-members-emails"
 REMOVE_BUTTON_TEXT = "Remove from group"
 INVITE_BUTTON_TEXT = "Invite"
@@ -174,56 +177,81 @@ def prompt_yes_no(message: str) -> bool:
     return response in {"y", "yes"}
 
 
-def find_matches_on_page(
-    driver: webdriver.Firefox,
-    remaining_lower: Set[str],
-    lower_to_original: Dict[str, str],
-) -> List[Tuple[WebElement, str]]:
-    """Find rows on the current page matching a set of target emails.
-
-    Args:
-        driver (webdriver.Firefox):
-            The active Selenium driver, positioned on a members page.
-        remaining_lower (Set[str]):
-            Lowercased target emails not yet accounted for.
-        lower_to_original (Dict[str, str]):
-            Mapping of lowercase email to original casing, as returned by
-            build_case_insensitive_index.
-
-    Returns:
-        List[Tuple[WebElement, str]]:
-            One (row, lowercased email) pair per row on this page whose
-            email is in remaining_lower.
-    """
-    WebDriverWait(driver, WAIT_TIMEOUT_SECONDS).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, TABLE_ROW_SELECTOR))
-    )
-    matches = []
-    for row in driver.find_elements(By.CSS_SELECTOR, TABLE_ROW_SELECTOR):
-        email_lower = get_row_email(driver, row).strip().lower()
-        if email_lower in remaining_lower:
-            matches.append((row, email_lower))
-    return matches
-
-
-def check_row_checkboxes(
-    driver: webdriver.Firefox, matches: List[Tuple[WebElement, str]]
-) -> None:
-    """Check the selection checkbox for each matched row.
+def find_member_row(
+    driver: webdriver.Firefox, email_lower: str
+) -> Optional[WebElement]:
+    """Find the currently displayed row for a lowercased email, if any.
 
     Args:
         driver (webdriver.Firefox):
             The active Selenium driver.
-        matches (List[Tuple[WebElement, str]]):
-            Rows to select, as returned by find_matches_on_page.
+        email_lower (str):
+            The target email, already lowercased.
+
+    Returns:
+        Optional[WebElement]:
+            The matching row, or None if no currently displayed row's
+            email matches.
     """
-    for row, _ in matches:
-        checkbox = row.find_element(By.CSS_SELECTOR, CHECKBOX_SELECTOR)
-        WebDriverWait(driver, WAIT_TIMEOUT_SECONDS).until(
-            EC.element_to_be_clickable(checkbox)
-        )
-        if not checkbox.is_selected():
-            checkbox.click()
+    for row in driver.find_elements(By.CSS_SELECTOR, TABLE_ROW_SELECTOR):
+        if get_row_email(driver, row).strip().lower() == email_lower:
+            return row
+    return None
+
+
+def search_for_email(
+    driver: webdriver.Firefox, email: str
+) -> Optional[WebElement]:
+    """Search the members list for email and return its row, if found.
+
+    Types email into the members-search box and waits for the filtered
+    results to settle, since the search box filters the table in place
+    without a page reload.
+
+    Args:
+        driver (webdriver.Firefox):
+            The active Selenium driver, already on the members page.
+        email (str):
+            The email address to search for.
+
+    Returns:
+        Optional[WebElement]:
+            The row for email once the search results settle, or None if
+            the search reports no matching members.
+    """
+    search_box = WebDriverWait(driver, WAIT_TIMEOUT_SECONDS).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, SEARCH_INPUT_SELECTOR))
+    )
+    search_box.clear()
+    search_box.send_keys(email)
+
+    email_lower = email.strip().lower()
+
+    def _results_settled(d: webdriver.Firefox):
+        row = find_member_row(d, email_lower)
+        if row is not None:
+            return row
+        return bool(d.find_elements(By.XPATH, NO_MEMBERS_XPATH))
+
+    result = WebDriverWait(driver, WAIT_TIMEOUT_SECONDS).until(_results_settled)
+    return result if isinstance(result, WebElement) else None
+
+
+def check_checkbox(driver: webdriver.Firefox, row: WebElement) -> None:
+    """Check a single row's selection checkbox if not already checked.
+
+    Args:
+        driver (webdriver.Firefox):
+            The active Selenium driver.
+        row (WebElement):
+            The row whose checkbox should be checked.
+    """
+    checkbox = row.find_element(By.CSS_SELECTOR, CHECKBOX_SELECTOR)
+    WebDriverWait(driver, WAIT_TIMEOUT_SECONDS).until(
+        EC.element_to_be_clickable(checkbox)
+    )
+    if not checkbox.is_selected():
+        checkbox.click()
 
 
 def click_remove_from_group_button(driver: webdriver.Firefox) -> None:
@@ -236,8 +264,11 @@ def click_remove_from_group_button(driver: webdriver.Firefox) -> None:
 
     Raises:
         RuntimeError:
-            If the button does not appear within WAIT_TIMEOUT_SECONDS,
-            indicating the checkbox selection was not registered.
+            If the button does not appear within WAIT_TIMEOUT_SECONDS
+            (the checkbox selection was not registered), or if it does not
+            go stale after being clicked (the click did not register; this
+            has been observed live as a transient stuck state in
+            Overleaf's page, recoverable by reloading and retrying).
     """
     try:
         button = WebDriverWait(driver, WAIT_TIMEOUT_SECONDS).until(
@@ -251,87 +282,75 @@ def click_remove_from_group_button(driver: webdriver.Firefox) -> None:
             "checkboxes; the page may not have registered the selection."
         ) from exc
     button.click()
-    WebDriverWait(driver, WAIT_TIMEOUT_SECONDS).until(EC.staleness_of(button))
+    try:
+        WebDriverWait(driver, WAIT_TIMEOUT_SECONDS).until(EC.staleness_of(button))
+    except TimeoutException as exc:
+        raise RuntimeError(
+            "Remove from group button did not go stale after being "
+            "clicked; the removal likely did not register."
+        ) from exc
 
 
-def get_next_page_button(driver: webdriver.Firefox) -> Optional[WebElement]:
-    """Find the pagination button that advances to the next page.
+def remove_email_with_retry(
+    driver: webdriver.Firefox, email: str, row: WebElement
+) -> None:
+    """Check row's checkbox and remove it, retrying once via reload on failure.
 
-    Note:
-        The fallback "»" control's exact next-vs-last semantics were not
-        verified against the live page; this assumes it advances one page
-        at a time, matching typical pagination widgets. Verify this live
-        before relying on it for a Delete list long enough to need it.
+    If checking the box and clicking "Remove from group" fails (see
+    click_remove_from_group_button), the page is reloaded and email is
+    searched for again before a second, final attempt. This mirrors the
+    only recovery observed live for the stuck-page failure mode: a full
+    page reload.
 
     Args:
         driver (webdriver.Firefox):
-            The active Selenium driver, positioned on a members page.
-
-    Returns:
-        Optional[WebElement]:
-            The button that navigates to the next page, or None if the
-            current page is the last one.
+            The active Selenium driver, already on the members page.
+        email (str):
+            The original-cased email being removed, used to re-search
+            after a retry reload.
+        row (WebElement):
+            The row located by the initial search_for_email call.
 
     Raises:
         RuntimeError:
-            If the current page number cannot be determined from the
-            pagination controls.
+            If removal still fails after MAX_REMOVE_ATTEMPTS attempts, or
+            if email can no longer be found after a retry reload.
     """
-    buttons = driver.find_elements(By.CSS_SELECTOR, "button[aria-label]")
-    current_page = None
-    for button in buttons:
-        aria_label = button.get_attribute("aria-label") or ""
-        if aria_label.endswith(", Current Page"):
-            try:
-                current_page = int(aria_label.split(",")[0].replace("Page", "").strip())
-            except ValueError:
-                continue
-            break
-    if current_page is None:
-        raise RuntimeError("Could not determine the current pagination page.")
-
-    next_label = f"Go to page {current_page + 1}"
-    for button in buttons:
-        if button.get_attribute("aria-label") == next_label:
-            return button
-
-    return find_button_by_text(driver, "button", "»")
-
-
-def go_to_next_page(driver: webdriver.Firefox, next_button: WebElement) -> None:
-    """Click a pagination button and wait for the table to refresh.
-
-    Args:
-        driver (webdriver.Firefox):
-            The active Selenium driver.
-        next_button (WebElement):
-            The pagination button to click, as returned by
-            get_next_page_button.
-    """
-    rows = driver.find_elements(By.CSS_SELECTOR, TABLE_ROW_SELECTOR)
-    anchor = rows[0] if rows else None
-    WebDriverWait(driver, WAIT_TIMEOUT_SECONDS).until(
-        EC.element_to_be_clickable(next_button)
-    )
-    next_button.click()
-    if anchor is not None:
-        WebDriverWait(driver, WAIT_TIMEOUT_SECONDS).until(EC.staleness_of(anchor))
-    WebDriverWait(driver, WAIT_TIMEOUT_SECONDS).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, TABLE_ROW_SELECTOR))
-    )
+    for attempt in range(1, MAX_REMOVE_ATTEMPTS + 1):
+        try:
+            check_checkbox(driver, row)
+            click_remove_from_group_button(driver)
+            return
+        except RuntimeError as exc:
+            if attempt == MAX_REMOVE_ATTEMPTS:
+                raise RuntimeError(
+                    f"Failed to remove {email} after {MAX_REMOVE_ATTEMPTS} "
+                    "attempts."
+                ) from exc
+            print(
+                f"Warning: removal attempt {attempt} for {email} failed "
+                f"({exc}); reloading the page and retrying."
+            )
+            driver.get(BASE_URL)
+            retried_row = search_for_email(driver, email)
+            if retried_row is None:
+                raise RuntimeError(
+                    f"Could not find {email} again after reloading to "
+                    "retry removal."
+                ) from exc
+            row = retried_row
 
 
 def process_delete_flow(
     driver: webdriver.Firefox, delete_emails: List[str]
 ) -> Tuple[List[str], List[str], List[str]]:
-    """Remove the given emails from the group, page by page, with prompts.
+    """Remove the given emails from the group, one at a time, with prompts.
 
-    Walks the members table one page at a time. On each page, any rows
-    matching delete_emails are checked and the user is asked to confirm
-    before "Remove from group" is clicked; a decline is recorded and never
-    retried, since each account appears in exactly one row across the
-    whole table. Stops once every email has been accounted for or once
-    pagination is exhausted.
+    For each email, searches the members list via the search box; if a
+    matching row is found, checks it, asks the user to confirm, and clicks
+    "Remove from group" on a yes (see remove_email_with_retry for the
+    one-reload retry on failure). A no is recorded as declined rather than
+    retried.
 
     Args:
         driver (webdriver.Firefox):
@@ -339,54 +358,44 @@ def process_delete_flow(
         delete_emails (List[str]):
             Emails to remove from the group.
 
+    Raises:
+        RuntimeError:
+            If removing a confirmed email fails twice in a row (see
+            remove_email_with_retry).
+
     Returns:
         tuple:
             removed (List[str]):
                 Emails the user confirmed and were removed, sorted.
             declined (List[str]):
-                Emails found on a page but the user declined to remove,
-                sorted.
+                Emails found but the user declined to remove, sorted.
             not_found (List[str]):
-                Emails never encountered on any page, sorted.
+                Emails the search reported no match for, sorted.
     """
     lower_to_original = build_case_insensitive_index(delete_emails)
-    remaining: Set[str] = set(lower_to_original)
     removed: List[str] = []
     declined: List[str] = []
+    not_found: List[str] = []
 
-    while True:
-        matches = find_matches_on_page(driver, remaining, lower_to_original)
-        if matches:
-            matched_originals = sorted(
-                lower_to_original[email_lower] for _, email_lower in matches
-            )
-            print("Found the following account(s) to remove on this page:")
-            for email in matched_originals:
-                print(f"  {email}")
-            if prompt_yes_no(
-                f"Remove these {len(matched_originals)} account(s) from the group?"
-            ):
-                check_row_checkboxes(driver, matches)
-                click_remove_from_group_button(driver)
-                for _, email_lower in matches:
-                    remaining.discard(email_lower)
-                    removed.append(lower_to_original[email_lower])
-                print(f"Removed {len(matched_originals)} account(s).")
-            else:
-                for _, email_lower in matches:
-                    remaining.discard(email_lower)
-                    declined.append(lower_to_original[email_lower])
-                print("Skipped removal for this page's matches.")
+    for _, original_email in sorted(
+        lower_to_original.items(), key=lambda item: item[1]
+    ):
+        row = search_for_email(driver, original_email)
+        if row is None:
+            print(f"Not found: {original_email}")
+            not_found.append(original_email)
+            continue
 
-        if not remaining:
-            break
-        next_button = get_next_page_button(driver)
-        if next_button is None:
-            break
-        go_to_next_page(driver, next_button)
+        print(f"Found account to remove: {original_email}")
+        if prompt_yes_no(f"Remove {original_email} from the group?"):
+            remove_email_with_retry(driver, original_email, row)
+            removed.append(original_email)
+            print(f"Removed {original_email}.")
+        else:
+            declined.append(original_email)
+            print(f"Skipped {original_email}.")
 
-    not_found = sorted(lower_to_original[email_lower] for email_lower in remaining)
-    return sorted(removed), sorted(declined), not_found
+    return sorted(removed), sorted(declined), sorted(not_found)
 
 
 def process_add_flow(driver: webdriver.Firefox, add_emails: List[str]) -> None:
