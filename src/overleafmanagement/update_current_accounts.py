@@ -1,12 +1,15 @@
-"""Download the current Overleaf group members export into a DataFrame.
+"""Download the current Overleaf group members export into Google Sheets.
 
 Overleaf's group members export requires an authenticated browser session,
 so this module uses Selenium only to let the user log in interactively in a
 real Firefox window. Once logged in, the session cookies are handed off to
 ``requests`` to fetch the export CSV directly, which is downloaded to a
-temporary file and loaded into a pandas DataFrame.
+temporary file and loaded into a pandas DataFrame. The result is written to the
+``Current Accounts`` worksheet of the default bundle sheet and, optionally, of a
+second user-supplied Google Sheets workbook.
 """
 
+import argparse
 import os
 import tempfile
 
@@ -19,6 +22,7 @@ GROUP_ID = "5ba29530a9a3c57d4039f59d"
 BASE_URL = f"https://www.overleaf.com/manage/groups/{GROUP_ID}/members"
 EXPORT_URL = f"{BASE_URL}/export"
 SHEET_NAME = "Revised Overleaf Bundle"
+CURRENT_ACCOUNTS_TITLE = "Current Accounts"
 
 
 def wait_for_login(driver: webdriver.Firefox, url: str) -> None:
@@ -110,8 +114,46 @@ def main() -> None:
     """Authenticate, download the group members export, and upload it.
 
     The export's email and last login columns are written to the "Current
-    Accounts" worksheet of the bundle sheet.
+    Accounts" worksheet of the default bundle sheet (SHEET_NAME) and, if
+    ``-s/--second_sheet_name`` is given on the command line, of that workbook
+    as well. All target worksheets are located before logging in to Overleaf so
+    that a bad sheet name fails immediately.
+
+    Raises:
+        gspread.exceptions.SpreadsheetNotFound:
+            If a target workbook name cannot be opened.
+        gspread.exceptions.WorksheetNotFound:
+            If a target workbook lacks a "Current Accounts" worksheet.
     """
+    parser = argparse.ArgumentParser(
+        description=(
+            "Update the Current Accounts tab of the bundle sheet from the "
+            "Overleaf group members export."
+        )
+    )
+    parser.add_argument(
+        "-s",
+        "--second_sheet_name",
+        type=str,
+        default=None,
+        help=(
+            "Name of an additional Google Sheets workbook whose "
+            f"{CURRENT_ACCOUNTS_TITLE!r} tab is also updated "
+            f"(in addition to {SHEET_NAME!r})."
+        ),
+    )
+    args = parser.parse_args()
+
+    sheet_names = [SHEET_NAME]
+    if args.second_sheet_name is not None and args.second_sheet_name != SHEET_NAME:
+        sheet_names.append(args.second_sheet_name)
+
+    gc = gspread.oauth()
+    worksheets = [
+        gc.open(sheet_name).worksheet(CURRENT_ACCOUNTS_TITLE)
+        for sheet_name in sheet_names
+    ]
+
     driver = webdriver.Firefox()
     try:
         wait_for_login(driver, BASE_URL)
@@ -124,17 +166,10 @@ def main() -> None:
         members = pd.read_csv(csv_path)
     members = members[["email", "last_logged_in_at"]]
 
-    gc = gspread.oauth()
-    bundle = gc.open(SHEET_NAME)
-    sheets = bundle.worksheets()
-
-    # find Current Accounts tab
-    for sheet in sheets:
-        if sheet.title == "Current Accounts":
-            break
-    assert sheet.title == "Current Accounts", "Could not find Current Accounts in sheet"
-
-    sheet.update([members.columns.values.tolist()] + members.fillna("").values.tolist())
+    payload = [members.columns.values.tolist()] + members.fillna("").values.tolist()
+    for sheet_name, worksheet in zip(sheet_names, worksheets):
+        worksheet.update(payload)
+        print(f"Updated {CURRENT_ACCOUNTS_TITLE!r} in {sheet_name!r}")
 
 
 if __name__ == "__main__":
