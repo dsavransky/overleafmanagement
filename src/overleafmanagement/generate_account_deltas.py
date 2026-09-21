@@ -139,44 +139,18 @@ def write_deltas_xlsx(
         )
 
 
-def main(prev_sheet_name: str, curr_sheet_name: str = DEFAULT_CURR_SHEET_NAME) -> None:
+def main() -> None:
     """Compute and write account deltas between two Overleaf bundle sheets.
 
-    Args:
-        prev_sheet_name (str):
-            Name of the previous Google Sheets workbook to open.
-        curr_sheet_name (str):
-            Name of the current Google Sheets workbook to open, defaulting
-            to DEFAULT_CURR_SHEET_NAME.
+    The previous sheet name is a required positional command-line argument; the
+    current sheet name is set with ``-c/--curr_sheet_name`` and defaults to
+    DEFAULT_CURR_SHEET_NAME.
 
     Raises:
         gspread.exceptions.SpreadsheetNotFound:
             If either sheet name cannot be opened.
         gspread.exceptions.WorksheetNotFound:
             If either spreadsheet lacks an "All Accounts" worksheet.
-    """
-    gc = gspread.oauth()
-    prev_spreadsheet = gc.open(prev_sheet_name)
-    curr_spreadsheet = gc.open(curr_sheet_name)
-
-    prev_emails = get_worksheet_emails(prev_spreadsheet)
-    curr_emails = get_worksheet_emails(curr_spreadsheet)
-
-    to_delete, to_add = compute_deltas(prev_emails, curr_emails)
-    write_deltas_xlsx(to_delete, to_add)
-
-    print(
-        f"Wrote {len(to_delete)} deletion(s) and {len(to_add)} addition(s) "
-        f"to {OUTPUT_FILENAME}"
-    )
-
-
-def _parse_args() -> argparse.Namespace:
-    """Parse command-line arguments for this script.
-
-    Returns:
-        argparse.Namespace:
-            Parsed arguments with prev_sheet_name and curr_sheet_name.
     """
     parser = argparse.ArgumentParser(
         description="Compute Overleaf account deltas between two sheets."
@@ -196,9 +170,23 @@ def _parse_args() -> argparse.Namespace:
             f"(default: {DEFAULT_CURR_SHEET_NAME!r})."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    gc = gspread.oauth()
+    prev_spreadsheet = gc.open(args.prev_sheet_name)
+    curr_spreadsheet = gc.open(args.curr_sheet_name)
+
+    prev_emails = get_worksheet_emails(prev_spreadsheet)
+    curr_emails = get_worksheet_emails(curr_spreadsheet)
+
+    to_delete, to_add = compute_deltas(prev_emails, curr_emails)
+    write_deltas_xlsx(to_delete, to_add)
+
+    print(
+        f"Wrote {len(to_delete)} deletion(s) and {len(to_add)} addition(s) "
+        f"to {OUTPUT_FILENAME}"
+    )
 
 
 if __name__ == "__main__":
-    args = _parse_args()
-    main(args.prev_sheet_name, args.curr_sheet_name)
+    main()

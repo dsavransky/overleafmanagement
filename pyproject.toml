@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "overleafmanagement"
+version = "0.1.0"
+description = "Manage an Overleaf group's membership from a Google Sheets bundle."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Dmitry Savransky", email = "ds264@cornell.edu" }]
+dependencies = [
+    "gspread",
+    "openpyxl",
+    "pandas",
+    "requests",
+    "selenium",
+]
+
+[project.scripts]
+overleaf-account-deltas = "overleafmanagement.generate_account_deltas:main"
+overleaf-update-accounts = "overleafmanagement.update_current_accounts:main"
+overleaf-update-members = "overleafmanagement.update_group_members:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

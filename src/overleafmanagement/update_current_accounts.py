@@ -107,11 +107,10 @@ def download_export(session: requests.Session, url: str, dest_dir: str) -> str:
 
 
 def main() -> None:
-    """Authenticate, download the group members export, and load it.
+    """Authenticate, download the group members export, and upload it.
 
-    Returns:
-        pd.DataFrame:
-            The current group members data.
+    The export's email and last login columns are written to the "Current
+    Accounts" worksheet of the bundle sheet.
     """
     driver = webdriver.Firefox()
     try:

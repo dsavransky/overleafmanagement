@@ -20,8 +20,8 @@ from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from generate_account_deltas import OUTPUT_FILENAME
-from update_current_accounts import BASE_URL, wait_for_login
+from overleafmanagement.generate_account_deltas import OUTPUT_FILENAME
+from overleafmanagement.update_current_accounts import BASE_URL, wait_for_login
 
 DELETE_SHEET_NAME = "Delete"
 ADD_SHEET_NAME = "Add"
@@ -435,15 +435,29 @@ def process_add_flow(driver: webdriver.Firefox, add_emails: List[str]) -> None:
     print(f"Invited {len(add_emails)} account(s): {joined}")
 
 
-def main(input_path: str) -> None:
-    """Apply the Delete/Add lists from input_path to the Overleaf group.
+def main() -> None:
+    """Apply the Delete/Add lists from an account deltas file to the Overleaf group.
 
-    Args:
-        input_path (str):
-            Path to the account deltas ``.xlsx`` file, as produced by
-            generate_account_deltas.write_deltas_xlsx.
+    The path to the account deltas ``.xlsx`` file (as produced by
+    generate_account_deltas.write_deltas_xlsx) is read from the command line via
+    ``-i/--input``.
     """
-    delete_emails, add_emails = read_email_lists(input_path)
+    parser = argparse.ArgumentParser(
+        description="Apply account deltas to the Overleaf group members page."
+    )
+    parser.add_argument(
+        "-i",
+        "--input",
+        type=str,
+        default=OUTPUT_FILENAME,
+        help=(
+            "Path to the account deltas .xlsx file produced by "
+            f"generate_account_deltas.py (default: {OUTPUT_FILENAME!r})."
+        ),
+    )
+    args = parser.parse_args()
+
+    delete_emails, add_emails = read_email_lists(args.input)
     print(
         f"Loaded {len(delete_emails)} account(s) to delete and "
         f"{len(add_emails)} account(s) to add."
@@ -472,29 +486,5 @@ def main(input_path: str) -> None:
     )
 
 
-def _parse_args() -> argparse.Namespace:
-    """Parse command-line arguments for this script.
-
-    Returns:
-        argparse.Namespace:
-            Parsed arguments with a single ``input`` path.
-    """
-    parser = argparse.ArgumentParser(
-        description="Apply account deltas to the Overleaf group members page."
-    )
-    parser.add_argument(
-        "-i",
-        "--input",
-        type=str,
-        default=OUTPUT_FILENAME,
-        help=(
-            "Path to the account deltas .xlsx file produced by "
-            f"generate_account_deltas.py (default: {OUTPUT_FILENAME!r})."
-        ),
-    )
-    return parser.parse_args()
-
-
 if __name__ == "__main__":
-    args = _parse_args()
-    main(args.input)
+    main()
