@@ -18,9 +18,15 @@ from typing import Dict, List, Tuple
 
 import gspread
 import pandas as pd
+import dotenv
+import os
 
-ALL_ACCOUNTS_TITLE = "All Accounts"
-DEFAULT_CURR_SHEET_NAME = "Revised Overleaf Bundle"
+
+dotenv.load_dotenv()
+
+CURRENT_ACCOUNTS_TITLE = os.getenv("CURRENT_ACCOUNTS_TITLE", "Current Accounts")
+ALL_ACCOUNTS_TITLE = os.getenv("ALL_ACCOUNTS_TITLE", "All Accounts")
+DEFAULT_CURR_SHEET_NAME = os.getenv("SHEET_NAME", "Revised Overleaf Bundle")
 OUTPUT_FILENAME = "account_deltas.xlsx"
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -147,7 +153,7 @@ def write_deltas_xlsx(
 def main() -> None:
     """Compute and write account deltas between two Overleaf bundle sheets.
 
-    Two modes are selected from the command line:
+    Three modes are selected from the command line:
 
     * Two workbooks (default): the previous workbook name is a positional
       argument; the current workbook name is set with ``-c/--curr_sheet_name``
@@ -156,6 +162,8 @@ def main() -> None:
     * One workbook: ``-w/--workbook_name`` names a single workbook, and
       ``-p/--prev_tab_name`` and ``-t/--curr_tab_name`` name the two worksheets
       within it to compare.
+    * Two workbooks and two worksheets: ``-a/--prev_workbook_name`` names the previous workbook, ``-b/--curr_workbook_name`` names the current workbook, ``-p/--prev_tab_name`` names the sheet in the previous workbook, and ``-t/--curr_tab_name`` names the sheet in the current workbook.
+
 
     Raises:
         gspread.exceptions.SpreadsheetNotFound:
@@ -166,8 +174,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Compute Overleaf account deltas between two sheets, either in two "
-            "separate workbooks (prev_sheet_name [-c]) or in two tabs of one "
-            "workbook (-w -p -t)."
+            "separate workbooks (prev_sheet_name [-c]), in two tabs of one "
+            "workbook (-w -p -t), or in two tabs of two workbooks (-a -c -p -t)."
         )
     )
     parser.add_argument(
@@ -204,39 +212,99 @@ def main() -> None:
         "--prev_tab_name",
         type=str,
         default=None,
-        help="Name of the previous tab to compare from. Requires -w.",
+        help=(
+            "Name of the previous tab to compare from. Requires -a or -w."
+        )
+    )
+    parser.add_argument(
+        "-a",
+        "--prev_workbook_name",
+        type=str,
+        default=None,
+        help=(
+            "Name of the previous Google Sheets workbook to compare from, "
+            "Requires -b, -p and -t."
+        )
+    )  
+    parser.add_argument(
+        "-b",
+        "--curr_workbook_name",
+        type=str,
+        default=None,
+        help=(
+            "Name of the current Google Sheets workbook to compare against, "
+            "Requires -a, -p and -t."
+        ),
     )
     parser.add_argument(
         "-t",
         "--curr_tab_name",
         type=str,
         default=None,
-        help="Name of the current tab to compare against. Requires -w.",
+        help="Name of the current tab to compare against. Requires -a or -w.",
     )
     args = parser.parse_args()
 
-    if args.workbook_name is None:
-        if args.prev_sheet_name is None:
-            parser.error("provide either prev_sheet_name or -w/--workbook_name")
-        if args.prev_tab_name is not None or args.curr_tab_name is not None:
-            parser.error("-p/--prev_tab_name and -t/--curr_tab_name require -w")
-    else:
-        if args.prev_sheet_name is not None or args.curr_sheet_name is not None:
-            parser.error(
-                "-w/--workbook_name cannot be combined with prev_sheet_name or "
-                "-c/--curr_sheet_name"
-            )
-        if args.prev_tab_name is None or args.curr_tab_name is None:
+    if args.prev_sheet_name is None:
+        if args.workbook_name is None and args.prev_workbook_name is None:
+            parser.error(f"""provide one of: 
+            prev_sheet_name -c/--curr_sheet_name
+            -w/--workbook_name -p/--prev_tab_name -t/--curr_tab_name or
+            -a/--prev_workbook_name -b/--curr_workbook_name -p/--prev_tab_name -t/--curr_tab_name""")
+        if args.workbook_name is not None and args.prev_tab_name is None and args.curr_tab_name is None:
             parser.error("-w/--workbook_name requires both -p and -t")
+        if args.prev_workbook_name is not None and (args.curr_workbook_name is None or args.prev_tab_name is None or args.curr_tab_name is None):
+            parser.error("-a/--prev_workbook_name requires -b, -p and -t")
+    else:
+        if args.workbook_name is not None and (args.prev_workbook_name is not None or args.curr_sheet_name is not None or args.prev_workbook_name is not None):
+            parser.error(f"""-w/--workbook_name cannot be combined with prev_sheet_name or 
+                -c/--curr_sheet_name or 
+                -a/--prev_workbook_name""")
+        elif args.curr_sheet_name is None:
+            parser.error(f"""prev_sheet_name requires -c/--curr_sheet_name""")
+
+    print(args)
+  
 
     gc = gspread.oauth()
-    if args.workbook_name is None:
-        prev_spreadsheet = gc.open(args.prev_sheet_name)
-        curr_spreadsheet = gc.open(args.curr_sheet_name or DEFAULT_CURR_SHEET_NAME)
+    if args.workbook_name is None and args.prev_workbook_name is None:
+        try:
+            prev_spreadsheet = gc.open(args.prev_sheet_name)
+            curr_spreadsheet = gc.open(args.curr_sheet_name or DEFAULT_CURR_SHEET_NAME)
+        except Exception as e:
+            print(f"Error opening spreadsheets: {e}")
+            exit(1)
         prev_emails = get_worksheet_emails(prev_spreadsheet)
         curr_emails = get_worksheet_emails(curr_spreadsheet)
+    elif args.prev_workbook_name is None:
+        try:
+            spreadsheet = gc.open(args.workbook_name)
+            worksheet_list = spreadsheet.worksheets()
+            prev_emails = get_worksheet_emails(spreadsheet, args.prev_tab_name)
+            curr_emails = get_worksheet_emails(spreadsheet, args.curr_tab_name)
+        except Exception as e:
+            print(f"Error opening spreadsheet: {e}")
+            exit(1)
+    elif args.prev_workbook_name is not None and args.curr_workbook_name is not None and args.prev_tab_name is not None and args.curr_tab_name is not None:
+        if args.prev_workbook_name == args.curr_workbook_name:
+            print("workbook names are the same - use -w/--workbook_name instead")
+            exit(1)
+        print("Using two workbooks and two tabs")
+        try:
+            prev_spreadsheet = gc.open(args.prev_workbook_name)
+            curr_spreadsheet = gc.open(args.curr_workbook_name)
+        except Exception as e:
+            print(f"Error opening spreadsheets: {e}")
+            exit(1)
+        prev_emails = get_worksheet_emails(prev_spreadsheet, args.prev_tab_name)
+        curr_emails = get_worksheet_emails(curr_spreadsheet, args.curr_tab_name)
     else:
-        spreadsheet = gc.open(args.workbook_name)
+        try:
+            prev_spreadsheet = gc.open(args.prev_sheet_name)
+            curr_spreadsheet = gc.open(args.curr_sheet_name)
+        except Exception as e:
+            print(f"Error opening spreadsheets: {e}")
+            exit(1)
         prev_emails = get_worksheet_emails(spreadsheet, args.prev_tab_name)
         curr_emails = get_worksheet_emails(spreadsheet, args.curr_tab_name)
 
