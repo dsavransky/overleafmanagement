@@ -131,3 +131,6 @@ dmypy.json
 .*.swp
 .DS_Store
 .aider*
+
+# Excel file output
+*.xlsx

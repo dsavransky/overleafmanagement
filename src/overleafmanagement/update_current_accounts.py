@@ -13,17 +13,19 @@ import argparse
 import os
 import tempfile
 
+import dotenv
 import gspread
 import pandas as pd
 import requests
 from selenium import webdriver
+from selenium.webdriver.firefox.options import Options
 
-GROUP_ID = "5ba29530a9a3c57d4039f59d"
+dotenv.load_dotenv()
+GROUP_ID = os.getenv("GROUP_ID", "5ba29530a9a3c57d4039f59d")
+SHEET_NAME = os.getenv("SHEET_NAME", "Revised Overleaf Bundle")
+CURRENT_ACCOUNTS_TITLE = os.getenv("CURRENT_ACCOUNTS_TITLE", "Current Accounts")
 BASE_URL = f"https://www.overleaf.com/manage/groups/{GROUP_ID}/members"
 EXPORT_URL = f"{BASE_URL}/export"
-SHEET_NAME = "Revised Overleaf Bundle"
-CURRENT_ACCOUNTS_TITLE = "Current Accounts"
-
 
 def wait_for_login(driver: webdriver.Firefox, url: str) -> None:
     """Navigate to url and block until the user confirms they are logged in.
@@ -165,12 +167,19 @@ def main() -> None:
         csv_path = download_export(session, EXPORT_URL, tmp_dir)
         members = pd.read_csv(csv_path)
     members = members[["email", "last_logged_in_at"]]
-
+    # Rename the "email" column to "Email" to match the header in Google Sheets
+    members.rename(columns={"email": "Email"}, inplace=True)
     payload = [members.columns.values.tolist()] + members.fillna("").values.tolist()
     for sheet_name, worksheet in zip(sheet_names, worksheets):
         worksheet.update(payload)
+        # Check for length mismatch, remove excess if necessary
+        data_rows = worksheet.get_all_values()
+        curr_member_len = len(data_rows) - 1 # subtract for header row
+        new_member_len = members.shape[0]  # doesn't include header row
+        if new_member_len < curr_member_len:
+            worksheet.batch_clear([f"A{new_member_len + 1}:{curr_member_len + 1}"])
+        print(f"Sheet row count: {curr_member_len}, New members count: {new_member_len}")
         print(f"Updated {CURRENT_ACCOUNTS_TITLE!r} in {sheet_name!r}")
-
 
 if __name__ == "__main__":
     main()

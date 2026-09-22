@@ -1,0 +1,12 @@
+dotenv
+google-auth
+google-auth-oauthlib
+gspread
+numpy
+oauthlib
+pandas
+python-dotenv
+requests
+requests-oauthlib
+selenium
+openpyxl
